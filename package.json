@@ -1,0 +1,53 @@
+{
+  "name": "bulkhead-runtime",
+  "version": "0.1.0",
+  "description": "Multi-tenant AI agent runtime with OS-level isolation. Sandboxed execution, encrypted credentials, private memory per tenant — one server, no Docker.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tonga54/bulkhead-runtime.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "bulkhead-runtime": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx src/cli.ts",
+    "docker:build": "docker compose build",
+    "docker:test": "docker compose run --rm dev pnpm test",
+    "docker:shell": "docker compose run --rm dev bash"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "0.55.3",
+    "@mariozechner/pi-ai": "0.55.3",
+    "@mariozechner/pi-coding-agent": "0.55.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.2"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "os": ["linux"],
+  "packageManager": "pnpm@10.23.0"
+}

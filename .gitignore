@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.demo-memory-db/
+.bulkhead-runtime-demo/
+.platform-demo/
+*.db
+.context/

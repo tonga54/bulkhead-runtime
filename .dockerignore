@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.git/
+*.db
+.demo-memory-db/
+.bulkhead-runtime-demo/
+.platform-demo/
+gemini_api_key

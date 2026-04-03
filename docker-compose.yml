@@ -1,0 +1,12 @@
+services:
+  dev:
+    build: .
+    privileged: true
+    volumes:
+      - .:/app
+      - app_node_modules:/app/node_modules
+    working_dir: /app
+    command: pnpm test
+
+volumes:
+  app_node_modules:
