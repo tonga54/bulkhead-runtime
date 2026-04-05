@@ -1,22 +1,14 @@
-**Run 1,000 AI agents on a single Linux box.**  
-Each in its own OS namespace. Each with private memory, encrypted credentials, and an isolated filesystem.  
-**No Docker. No cloud. No VMs. One** `npm install`**.**
+![Bulkhead Runtime](docs/assets/hero-banner.png)
+
+[![npm](https://img.shields.io/npm/v/bulkhead-runtime?style=flat-square&color=00ff41&labelColor=0d1117)](https://www.npmjs.com/package/bulkhead-runtime) ![MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square&labelColor=0d1117) ![node](https://img.shields.io/badge/node-%3E%3D22.12-brightgreen?style=flat-square&labelColor=0d1117&logo=node.js&logoColor=white) ![deps](https://img.shields.io/badge/runtime_deps-3-00ff41?style=flat-square&labelColor=0d1117) ![tests](https://img.shields.io/badge/tests-279_passing-00ff41?style=flat-square&labelColor=0d1117) ![isolation](https://img.shields.io/badge/sandbox-5_isolation_layers-ff6b6b?style=flat-square&labelColor=0d1117) ![crypto](https://img.shields.io/badge/crypto-AES--256--GCM-blueviolet?style=flat-square&labelColor=0d1117)
+
+**Run 1,000 AI agents on a single Linux box.**
+Each in its own OS namespace. Each with private memory, encrypted credentials, and an isolated filesystem.
+**No Docker. No cloud. One `npm install`.**
 
 *Built on production-hardened internals from [OpenClaw](https://github.com/nicepkg/openclaw) — failover, SSRF protection, embedding pipelines, session indexing, and more.*
 
----
-
----
-
-## Why This Exists
-
-Every AI platform hits the same wall: **you need multiple agents running on the same server, and they absolutely cannot see each other's data.**
-
-Customer A's API keys must never leak to Customer B. Team Engineering's database credentials can't bleed into Team Marketing's agent. A rogue agent shouldn't be able to read `/etc/shadow` or exfiltrate data through DNS.
-
-The usual answers — Docker per user, cloud VMs, or "just be careful with access control" — are either too heavy, too expensive, or too fragile.
-
-**Bulkhead Runtime solves this at the kernel level.** Each agent runs inside Linux namespaces with 5 layers of OS isolation, encrypted credential stores, private memory databases, and SSRF-hardened HTTP. It's a library — `npm install` it, call `createPlatform()`, and you have production-grade multi-tenant isolation in your app.
+![Features](docs/assets/features.png)
 
 ---
 
@@ -139,6 +131,8 @@ await platform.deleteWorkspace(jobId);
 
 ## How It Works
 
+![Architecture](docs/assets/architecture.png)
+
 > Agent A cannot see Agent B's files, memory, credentials, or processes. Not by policy. **By kernel enforcement.**
 
 ---
@@ -213,11 +207,7 @@ const bob = await platform.createWorkspace("bob", {
 
 When `workspace.run()` executes, Bulkhead spawns a **child process** with 5 layers of kernel isolation. The agent **never runs in your application's process**.
 
-<p align="center">
-  <img src="docs/assets/execution-flow.png" alt="Execution Flow" width="100%" />
-</p>
-
-
+![Execution Flow](docs/assets/execution-flow.png)
 
 The agent gets coding tools (bash, file read/write/edit) because the mount namespace restricts its entire filesystem view. **It literally cannot see anything outside its sandbox.**
 
@@ -232,11 +222,7 @@ await alice.credentials.store("github", { token: "ghp_alice_secret" });
 await alice.credentials.store("openai", { apiKey: "sk-..." });
 ```
 
-<p align="center">
-  <img src="docs/assets/credential-flow.png" alt="Credential Security Flow" width="100%" />
-</p>
-
-
+![Credential Flow](docs/assets/credential-flow.png)
 
 System environment variables (`PATH`, `HOME`, `NODE_ENV`) are protected from credential key collision. Skill IDs are validated against prototype pollution.
 
@@ -580,11 +566,7 @@ BULKHEAD_LOG_FILE=/var/log/bulkhead-runtime.log
 
 All layers are **fail-closed** — if any layer can't be applied, the sandbox refuses to start.
 
-<p align="center">
-  <img src="docs/assets/security-layers.png" alt="5 Layers of Sandbox Isolation" width="100%" />
-</p>
-
-
+![Security Layers](docs/assets/security-layers.png)
 
 ### Defense in Depth
 
@@ -658,11 +640,15 @@ src/
 ├── credentials/       AES-256-GCM encrypted store + credential proxy
 ├── skills/            Global registry + per-workspace enablement
 ├── runtime/           createRuntime() — single-user mode
-│   ├── model-fallback.ts   Automatic model fallback chains
-│   ├── context-guard.ts    Context window validation + guards
-│   ├── retry.ts            Exponential backoff with jitter
-│   ├── api-key-rotation.ts Multiple keys with rate-limit rotation
-│   ├── subagent.ts         Parallel subagent execution + registry
+│   ├── failover-error.ts   Error classification (ported from OpenClaw)
+│   ├── model-fallback.ts   Fallback chains + cooldown tracking
+│   ├── context-guard.ts    Context window guards (16K/32K thresholds)
+│   ├── retry.ts            Exponential backoff with jitter + retryAfterMs
+│   ├── api-key-rotation.ts Per-provider key rotation
+│   ├── subagent.ts         Parallel execution + lifecycle + registry
+│   ├── session-pruning.ts  Trim old tool results in context
+│   ├── tool-result-truncation.ts  Truncate oversized tool output
+│   ├── memory-flush.ts     Pre-compaction memory save
 │   └── stream-adapters.ts  Per-provider stream configuration
 ├── memory/            Hybrid search engine
 │   ├── hybrid.ts          Vector + FTS5 fusion scoring
@@ -680,7 +666,7 @@ src/
 └── config/            Configuration loading
 ```
 
-**75 source files** · **3 runtime deps** · Sandbox, crypto, IPC, logging, and SSRF use **zero external deps** — all Node.js built-ins.
+**78 source files** · **3 runtime deps** · Sandbox, crypto, IPC, logging, and SSRF use **zero external deps** — all Node.js built-ins.
 
 ---
 
