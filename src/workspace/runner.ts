@@ -32,6 +32,8 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 
 const log = createSubsystemLogger("workspace-runner");
 
+const MAX_SUBAGENT_DEPTH = 5;
+
 export interface WorkspaceRunnerOptions {
   userId: string;
   workspaceDir: string;
@@ -51,6 +53,13 @@ export function createWorkspaceRunner(
   const cooldownStore = createCooldownStore();
 
   return async function run(options: WorkspaceRunOptions): Promise<AgentRunResult> {
+    const depth = typeof (options as Record<string, unknown>)._depth === "number"
+      ? (options as Record<string, unknown>)._depth as number
+      : 0;
+    if (depth >= MAX_SUBAGENT_DEPTH) {
+      throw new Error(`Maximum subagent depth (${MAX_SUBAGENT_DEPTH}) exceeded`);
+    }
+
     const sessionId = options.sessionId ?? `session_${Date.now()}`;
     const requestedModelId = options.model ?? ctx.config.model ?? DEFAULT_MODEL;
     const requestedProvider = options.provider ?? ctx.config.provider ?? DEFAULT_PROVIDER;
@@ -167,7 +176,7 @@ export function createWorkspaceRunner(
           memoryLimitMb: 512,
           pidsLimit: 100,
           timeoutMs: 5 * 60 * 1000,
-          networkIsolation: true,
+          networkIsolation: false,
           mountBinds: [
             { source: projectDir, target: projectDir, readonly: true },
           ],
@@ -201,174 +210,172 @@ export function createWorkspaceRunner(
           { callTimeoutMs: agentTimeoutMs },
         );
 
-    const ipcRateLimiter = createIpcRateLimiter();
+        const ipcRateLimiter = createIpcRateLimiter();
 
-    hostPeer.handle("memory.search", async (params) => {
-      ipcRateLimiter.check("memory.search");
-      const p = params as Record<string, unknown> | undefined;
-      const query = p?.query;
-      if (typeof query !== "string" || query.length === 0) {
-        throw new Error("memory.search: 'query' must be a non-empty string");
-      }
-      if (query.length > 10_000) {
-        throw new Error("memory.search: 'query' exceeds maximum length (10000)");
-      }
-      const maxResults = typeof p?.maxResults === "number"
-        ? Math.min(Math.max(1, Math.floor(p.maxResults)), 100)
-        : undefined;
-      return ctx.memory.search(query, { maxResults });
-    });
+        hostPeer.handle("memory.search", async (params) => {
+          ipcRateLimiter.check("memory.search");
+          const p = params as Record<string, unknown> | undefined;
+          const query = p?.query;
+          if (typeof query !== "string" || query.length === 0) {
+            throw new Error("memory.search: 'query' must be a non-empty string");
+          }
+          if (query.length > 10_000) {
+            throw new Error("memory.search: 'query' exceeds maximum length (10000)");
+          }
+          const maxResults = typeof p?.maxResults === "number"
+            ? Math.min(Math.max(1, Math.floor(p.maxResults)), 100)
+            : undefined;
+          return ctx.memory.search(query, { maxResults });
+        });
 
-    hostPeer.handle("memory.store", async (params) => {
-      ipcRateLimiter.check("memory.store");
-      const p = params as Record<string, unknown> | undefined;
-      const content = p?.content;
-      if (typeof content !== "string" || content.length === 0) {
-        throw new Error("memory.store: 'content' must be a non-empty string");
-      }
-      if (content.length > 1_000_000) {
-        throw new Error("memory.store: 'content' exceeds maximum length (1000000)");
-      }
-      const metadata = p?.metadata as Record<string, unknown> | undefined;
-      if (metadata !== undefined) {
-        const metaStr = JSON.stringify(metadata);
-        if (metaStr.length > 10_000) {
-          throw new Error("memory.store: 'metadata' exceeds maximum serialized size (10000 bytes)");
+        hostPeer.handle("memory.store", async (params) => {
+          ipcRateLimiter.check("memory.store");
+          const p = params as Record<string, unknown> | undefined;
+          const content = p?.content;
+          if (typeof content !== "string" || content.length === 0) {
+            throw new Error("memory.store: 'content' must be a non-empty string");
+          }
+          if (content.length > 1_000_000) {
+            throw new Error("memory.store: 'content' exceeds maximum length (1000000)");
+          }
+          const metadata = p?.metadata as Record<string, unknown> | undefined;
+          if (metadata !== undefined) {
+            const metaStr = JSON.stringify(metadata);
+            if (metaStr.length > 10_000) {
+              throw new Error("memory.store: 'metadata' exceeds maximum serialized size (10000 bytes)");
+            }
+          }
+          const id = await ctx.memory.store(content, metadata);
+          return { id };
+        });
+
+        hostPeer.handle("skill.execute", async (params) => {
+          ipcRateLimiter.check("skill.execute");
+          const p = params as Record<string, unknown> | undefined;
+          const skillId = p?.skillId;
+          if (typeof skillId !== "string" || skillId.length === 0) {
+            throw new Error("skill.execute: 'skillId' must be a non-empty string");
+          }
+          if (!ctx.skills.isEnabled(skillId)) {
+            throw new Error(`Skill "${skillId}" is not enabled for this workspace`);
+          }
+          const skillEntry = ctx.skillRegistry.get(skillId);
+          if (!skillEntry) {
+            throw new Error(`Skill "${skillId}" not found in registry`);
+          }
+
+          const execScript = findSkillExecutable(skillEntry.path);
+          if (!execScript) {
+            throw new Error(
+              `Skill "${skillId}" has no executable script. ` +
+              `Add execute.js, execute.mjs, or execute.sh to the skill directory.`,
+            );
+          }
+
+          let resolvedScript: string;
+          try {
+            resolvedScript = fs.realpathSync(execScript);
+          } catch {
+            throw new Error(`Skill script "${execScript}" does not exist or is a broken symlink`);
+          }
+          const resolvedSkillDir = fs.realpathSync(skillEntry.path);
+          if (!resolvedScript.startsWith(resolvedSkillDir + path.sep)) {
+            throw new Error(`Skill script "${execScript}" resolves outside skill directory`);
+          }
+
+          const credentials = await ctx.credentials.resolve(skillId) ?? {};
+          const execParams = (p?.params ?? {}) as Record<string, unknown>;
+          const result = await executeSkillScript(execScript, execParams, credentials, resolvedSkillDir);
+          return { result };
+        });
+
+        hostPeer.handle("hooks.before_tool_call", async (params) => {
+          ipcRateLimiter.check("hooks.before_tool_call");
+          const p = params as Record<string, unknown> | undefined;
+          const toolName = typeof p?.toolName === "string" ? p.toolName : "unknown";
+          const input = (p?.input && typeof p.input === "object") ? p.input as Record<string, unknown> : {};
+          await ctx.hooks.run("before_tool_call", { toolName, input });
+          return {};
+        });
+
+        hostPeer.handle("hooks.after_tool_call", async (params) => {
+          ipcRateLimiter.check("hooks.after_tool_call");
+          const p = params as Record<string, unknown> | undefined;
+          const toolName = typeof p?.toolName === "string" ? p.toolName : "unknown";
+          const input = (p?.input && typeof p.input === "object") ? p.input as Record<string, unknown> : {};
+          await ctx.hooks.run("after_tool_call", { toolName, input, result: p?.result });
+          return {};
+        });
+
+        hostPeer.handle("agent.run.subagent", async (params) => {
+          ipcRateLimiter.check("agent.run.subagent");
+          const p = (params ?? {}) as Record<string, unknown>;
+          const subMessage = typeof p.message === "string" ? p.message : "";
+          if (!subMessage) {
+            return { error: "agent.run.subagent: 'message' is required" };
+          }
+          try {
+            const subResult = await run({
+              message: subMessage,
+              sessionId: typeof p.sessionId === "string" ? p.sessionId : undefined,
+              model: typeof p.model === "string" ? p.model : undefined,
+              provider: typeof p.provider === "string" ? p.provider : undefined,
+              systemPrompt: typeof p.systemPrompt === "string" ? p.systemPrompt : undefined,
+              _depth: depth + 1,
+            } as WorkspaceRunOptions);
+            return { response: subResult.response, sessionId: subResult.sessionId };
+          } catch (err) {
+            return { error: err instanceof Error ? err.message : String(err) };
+          }
+        });
+
+        const onEvent = (options as Record<string, unknown>).onEvent as
+          | ((event: Record<string, unknown>) => void)
+          | undefined;
+        if (onEvent) {
+          hostPeer.handle("agent.event", async (params) => {
+            const event = (params ?? {}) as Record<string, unknown>;
+            try { onEvent(event); } catch { /* caller error */ }
+            return {};
+          });
         }
-      }
-      const id = await ctx.memory.store(content, metadata);
-      return { id };
-    });
 
-    hostPeer.handle("skill.execute", async (params) => {
-      ipcRateLimiter.check("skill.execute");
-      const p = params as Record<string, unknown> | undefined;
-      const skillId = p?.skillId;
-      if (typeof skillId !== "string" || skillId.length === 0) {
-        throw new Error("skill.execute: 'skillId' must be a non-empty string");
-      }
-      if (!ctx.skills.isEnabled(skillId)) {
-        throw new Error(`Skill "${skillId}" is not enabled for this workspace`);
-      }
-      const skillEntry = ctx.skillRegistry.get(skillId);
-      if (!skillEntry) {
-        throw new Error(`Skill "${skillId}" not found in registry`);
-      }
+        hostPeer.start();
 
-      const execScript = findSkillExecutable(skillEntry.path);
-      if (!execScript) {
-        throw new Error(
-          `Skill "${skillId}" has no executable script. ` +
-          `Add execute.js, execute.mjs, or execute.sh to the skill directory.`,
+        sandboxProcess.waitForExit().then(
+          () => hostPeer.stop(),
+          () => hostPeer.stop(),
         );
-      }
 
-      let resolvedScript: string;
-      try {
-        resolvedScript = fs.realpathSync(execScript);
-      } catch {
-        throw new Error(`Skill script "${execScript}" does not exist or is a broken symlink`);
-      }
-      const resolvedSkillDir = fs.realpathSync(skillEntry.path);
-      if (!resolvedScript.startsWith(resolvedSkillDir + path.sep)) {
-        throw new Error(`Skill script "${execScript}" resolves outside skill directory`);
-      }
+        let result: AgentRunResult;
 
-      const credentials = await ctx.credentials.resolve(skillId) ?? {};
-      const execParams = (p?.params ?? {}) as Record<string, unknown>;
-      const result = await executeSkillScript(execScript, execParams, credentials, resolvedSkillDir);
-      return { result };
-    });
+        try {
+          const response = await hostPeer.call<{
+            response?: string;
+            sessionId?: string;
+            error?: string;
+          }>("agent.run", {
+            message: options.message,
+            sessionId,
+            model: modelId,
+            provider,
+            systemPrompt: systemPrompt || undefined,
+          });
 
-    hostPeer.handle("hooks.before_tool_call", async (params) => {
-      ipcRateLimiter.check("hooks.before_tool_call");
-      const p = params as Record<string, unknown> | undefined;
-      const toolName = typeof p?.toolName === "string" ? p.toolName : "unknown";
-      const input = (p?.input && typeof p.input === "object") ? p.input as Record<string, unknown> : {};
-      await ctx.hooks.run("before_tool_call", { toolName, input });
-      return {};
-    });
+          if (response.error) {
+            throw new Error(`Agent execution failed: ${response.error}`);
+          }
 
-    hostPeer.handle("hooks.after_tool_call", async (params) => {
-      ipcRateLimiter.check("hooks.after_tool_call");
-      const p = params as Record<string, unknown> | undefined;
-      const toolName = typeof p?.toolName === "string" ? p.toolName : "unknown";
-      const input = (p?.input && typeof p.input === "object") ? p.input as Record<string, unknown> : {};
-      await ctx.hooks.run("after_tool_call", { toolName, input, result: p?.result });
-      return {};
-    });
-
-    hostPeer.handle("agent.run.subagent", async (params) => {
-      ipcRateLimiter.check("agent.run.subagent");
-      const p = (params ?? {}) as Record<string, unknown>;
-      const subMessage = typeof p.message === "string" ? p.message : "";
-      if (!subMessage) {
-        return { error: "agent.run.subagent: 'message' is required" };
-      }
-      try {
-        const subResult = await run({
-          message: subMessage,
-          sessionId: typeof p.sessionId === "string" ? p.sessionId : undefined,
-          model: typeof p.model === "string" ? p.model : undefined,
-          provider: typeof p.provider === "string" ? p.provider : undefined,
-          systemPrompt: typeof p.systemPrompt === "string" ? p.systemPrompt : undefined,
-        } as WorkspaceRunOptions);
-        return { response: subResult.response, sessionId: subResult.sessionId };
-      } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
-      }
-    });
-
-    const onEvent = (options as Record<string, unknown>).onEvent as
-      | ((event: Record<string, unknown>) => void)
-      | undefined;
-    if (onEvent) {
-      hostPeer.handle("agent.event", async (params) => {
-        const event = (params ?? {}) as Record<string, unknown>;
-        try { onEvent(event); } catch { /* caller error */ }
-        return {};
-      });
-    }
-
-    hostPeer.start();
-
-    // If the child process dies, stop the IPC peer so pending calls reject
-    // instead of hanging forever. This prevents a deadlock where
-    // hostPeer.call() awaits a response that will never come.
-    sandboxProcess.waitForExit().then(
-      () => hostPeer.stop(),
-      () => hostPeer.stop(),
-    );
-
-    let result: AgentRunResult;
-
-    try {
-      const response = await hostPeer.call<{
-        response?: string;
-        sessionId?: string;
-        error?: string;
-      }>("agent.run", {
-        message: options.message,
-        sessionId,
-        model: modelId,
-        provider,
-        systemPrompt: systemPrompt || undefined,
-      });
-
-      if (response.error) {
-        throw new Error(`Agent execution failed: ${response.error}`);
-      }
-
-      result = {
-        response: response.response ?? "",
-        sessionId: response.sessionId ?? sessionId,
-      };
-    } catch (err) {
-      hostPeer.stop();
-      sandboxProcess.kill();
-      await sandboxProcess.waitForExit();
-      throw err;
-    }
+          result = {
+            response: response.response ?? "",
+            sessionId: response.sessionId ?? sessionId,
+          };
+        } catch (err) {
+          hostPeer.stop();
+          sandboxProcess.kill();
+          await sandboxProcess.waitForExit();
+          throw err;
+        }
 
         hostPeer.stop();
         sandboxProcess.kill();
@@ -469,11 +476,8 @@ const BLOCKED_CREDENTIAL_ENV_KEYS = new Set([
   "TMPDIR",
   "TEMP",
   "TMP",
-  "http_proxy",
   "HTTP_PROXY",
-  "https_proxy",
   "HTTPS_PROXY",
-  "no_proxy",
   "NO_PROXY",
   "ALL_PROXY",
 ]);

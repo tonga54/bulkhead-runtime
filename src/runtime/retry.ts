@@ -137,6 +137,6 @@ export function isRetryableError(message: string): boolean {
   return /(rate[_ ]limit|too many requests|429|resource has been exhausted|5\d\d|timeout|econnreset|socket hang up|fetch failed)/i.test(message);
 }
 
-export function isContextOverflowError(message: string): boolean {
-  return /(context.*(length|window|limit|overflow|too long|exceed)|max.*tokens|token.*limit|maximum.*context)/i.test(message);
-}
+export {
+  isLikelyContextOverflowError as isContextOverflowError,
+} from "./failover-error.js";

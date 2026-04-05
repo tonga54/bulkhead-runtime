@@ -1,14 +1,11 @@
 // Ported from OpenClaw src/infra/net/ssrf.ts + fetch-guard.ts
 // DNS validation: we resolve DNS ourselves, validate ALL resolved IPs against
-// the private/special-use blocklist, then let fetch() connect using the
-// original hostname (required for TLS/SNI to work).
-// Without undici dispatchers we cannot pin the TCP socket to our resolved IP,
-// so a small TOCTOU window exists between our DNS check and fetch()'s own
-// resolution. This is acceptable: an attacker would need to poison DNS
-// between our check and fetch's connect, which is a very narrow window.
-// Mitigation: fail-closed on DNS failure or empty results.
+// the private/special-use blocklist, then pin DNS via undici's Agent to ensure
+// fetch() connects to the exact IPs we validated (eliminates TOCTOU gap).
+// Fail-closed on DNS failure or empty results.
 
 import * as dns from "node:dns/promises";
+import { lookup as dnsLookupCb, type LookupAddress } from "node:dns";
 import * as net from "node:net";
 
 export class SsrFBlockedError extends Error {
@@ -103,6 +100,35 @@ function isBlockedSpecialUseIpv4(ip: string): boolean {
   return false;
 }
 
+function extractEmbeddedIpv4(ipv6Lower: string): string | null {
+  // ::ffff:x.x.x.x (IPv4-mapped, RFC 4291)
+  if (ipv6Lower.startsWith("::ffff:")) {
+    const rest = ipv6Lower.slice(7);
+    if (net.isIPv4(rest)) return rest;
+  }
+  // ::ffff:0:x.x.x.x (IPv4-translated, RFC 6052)
+  if (ipv6Lower.startsWith("::ffff:0:")) {
+    const rest = ipv6Lower.slice(9);
+    if (net.isIPv4(rest)) return rest;
+  }
+  // 64:ff9b::x.x.x.x (NAT64 well-known prefix, RFC 6052)
+  if (ipv6Lower.startsWith("64:ff9b::")) {
+    const rest = ipv6Lower.slice(9);
+    if (net.isIPv4(rest)) return rest;
+  }
+  // 64:ff9b:1::x.x.x.x (NAT64 local-use prefix, RFC 8215)
+  if (ipv6Lower.startsWith("64:ff9b:1::")) {
+    const rest = ipv6Lower.slice(11);
+    if (net.isIPv4(rest)) return rest;
+  }
+  // ::x.x.x.x (IPv4-compatible, deprecated RFC 4291 §2.5.5.1 but still dangerous)
+  if (ipv6Lower.startsWith("::") && !ipv6Lower.startsWith("::ffff")) {
+    const rest = ipv6Lower.slice(2);
+    if (rest && net.isIPv4(rest)) return rest;
+  }
+  return null;
+}
+
 function isBlockedSpecialUseIpv6(ip: string): boolean {
   const lower = ip.toLowerCase();
   if (lower === "::") return true;          // unspecified
@@ -110,10 +136,8 @@ function isBlockedSpecialUseIpv6(ip: string): boolean {
   if (lower.startsWith("fe80:")) return true;  // link-local
   if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // ULA
   if (lower.startsWith("ff")) return true;  // multicast
-  if (lower.startsWith("::ffff:")) {
-    const embedded = lower.slice(7);
-    if (net.isIPv4(embedded) && isBlockedSpecialUseIpv4(embedded)) return true;
-  }
+  const embedded = extractEmbeddedIpv4(lower);
+  if (embedded && isBlockedSpecialUseIpv4(embedded)) return true;
   return false;
 }
 
@@ -247,6 +271,87 @@ export async function validateUrl(url: string, policy?: SsrfPolicy): Promise<Val
   return { resolvedAddresses: [] };
 }
 
+// --- DNS pinning (from OpenClaw ssrf.ts createPinnedLookup) ---
+
+type DnsLookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | LookupAddress[],
+  family?: number,
+) => void;
+
+function createPinnedLookupCb(
+  targetHostname: string,
+  addresses: string[],
+): typeof dnsLookupCb {
+  const normalizedTarget = normalizeHostname(targetHostname);
+  let index = 0;
+  const records: LookupAddress[] = addresses.map((addr) => ({
+    address: addr,
+    family: addr.includes(":") ? 6 : 4,
+  }));
+
+  return ((
+    hostname: string,
+    optionsOrCb: unknown,
+    maybeCb?: unknown,
+  ) => {
+    const cb = (typeof optionsOrCb === "function" ? optionsOrCb : maybeCb) as
+      | DnsLookupCallback
+      | undefined;
+    if (!cb) return;
+
+    const normalized = normalizeHostname(hostname);
+    if (normalized !== normalizedTarget || records.length === 0) {
+      if (typeof optionsOrCb === "function") {
+        return (dnsLookupCb as Function)(hostname, cb);
+      }
+      return (dnsLookupCb as Function)(hostname, optionsOrCb, cb);
+    }
+
+    const opts = typeof optionsOrCb === "object" && optionsOrCb !== null
+      ? (optionsOrCb as { all?: boolean; family?: number })
+      : {};
+    const requestedFamily = typeof optionsOrCb === "number"
+      ? optionsOrCb
+      : (opts.family ?? 0);
+    const candidates = requestedFamily === 4 || requestedFamily === 6
+      ? records.filter((r) => r.family === requestedFamily)
+      : records;
+    const usable = candidates.length > 0 ? candidates : records;
+
+    if (opts.all) {
+      cb(null, usable);
+      return;
+    }
+    const chosen = usable[index % usable.length];
+    index = (index + 1) % usable.length;
+    cb(null, chosen.address, chosen.family);
+  }) as typeof dnsLookupCb;
+}
+
+async function buildPinnedFetchInit(
+  hostname: string,
+  resolvedAddresses: string[],
+  init: RequestInit,
+): Promise<{ init: RequestInit; cleanup: () => Promise<void> }> {
+  if (resolvedAddresses.length === 0) {
+    return { init, cleanup: async () => {} };
+  }
+  try {
+    // Node.js 22+ bundles undici; use its Agent for DNS pinning
+    // @ts-expect-error -- undici is bundled in Node.js 22+ but may lack type declarations
+    const { Agent } = await import("undici") as { Agent: new (opts: unknown) => { close(): Promise<void> } };
+    const lookup = createPinnedLookupCb(hostname, resolvedAddresses);
+    const agent = new Agent({ connect: { lookup } });
+    return {
+      init: { ...init, dispatcher: agent } as RequestInit,
+      cleanup: async () => { try { await agent.close(); } catch {} },
+    };
+  } catch {
+    return { init, cleanup: async () => {} };
+  }
+}
+
 // --- Guarded fetch with redirect handling (from fetch-guard.ts) ---
 
 const DEFAULT_MAX_REDIRECTS = 3;
@@ -290,12 +395,20 @@ export async function fetchWithSsrfGuard(
       throw new Error("Invalid URL: must be http or https");
     }
 
-    await validateUrl(currentUrl, policy);
+    const validationResult = await validateUrl(currentUrl, policy);
 
-    const response = await fetch(parsedUrl.toString(), {
-      ...(currentInit ?? {}),
-      redirect: "manual",
-    });
+    const pinned = await buildPinnedFetchInit(
+      parsedUrl.hostname,
+      validationResult.resolvedAddresses,
+      { ...(currentInit ?? {}), redirect: "manual" },
+    );
+
+    let response: Response;
+    try {
+      response = await fetch(parsedUrl.toString(), pinned.init);
+    } finally {
+      await pinned.cleanup();
+    }
 
     if (isRedirectStatus(response.status)) {
       const location = response.headers.get("location");

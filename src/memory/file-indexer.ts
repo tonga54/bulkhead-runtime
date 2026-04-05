@@ -128,7 +128,8 @@ export function createFileIndexer(options: FileIndexerOptions): FileIndexer {
     for (const p of [...(options.watchPaths ?? []), ...(options.extraPaths ?? [])]) {
       const resolved = path.isAbsolute(p) ? p : path.join(workspaceDir, p);
       try {
-        const stat = fs.statSync(resolved);
+        const stat = fs.lstatSync(resolved);
+        if (stat.isSymbolicLink()) continue;
         if (stat.isFile()) files.push(resolved);
         else if (stat.isDirectory()) files.push(...collectMarkdownFiles(resolved));
       } catch { /* skip */ }
