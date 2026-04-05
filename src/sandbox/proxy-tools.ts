@@ -26,10 +26,10 @@ export function createProxyTools(peer: IpcPeer): ProxyToolDef[] {
       description:
         "Search your memory for relevant information. Returns matching memories ranked by relevance.",
       parameters: {
-        type: "Object",
+        type: "object",
         properties: {
-          query: { type: "String" },
-          maxResults: { type: "Number" },
+          query: { type: "string" },
+          maxResults: { type: "number" },
         },
         required: ["query"],
       },
@@ -47,9 +47,9 @@ export function createProxyTools(peer: IpcPeer): ProxyToolDef[] {
       description:
         "Store information in your memory for future reference. Use this to remember important facts.",
       parameters: {
-        type: "Object",
+        type: "object",
         properties: {
-          content: { type: "String" },
+          content: { type: "string" },
         },
         required: ["content"],
       },
@@ -66,10 +66,10 @@ export function createProxyTools(peer: IpcPeer): ProxyToolDef[] {
       description:
         "Execute an enabled skill. Credentials are injected automatically by the platform.",
       parameters: {
-        type: "Object",
+        type: "object",
         properties: {
-          skillId: { type: "String" },
-          params: { type: "Object" },
+          skillId: { type: "string" },
+          params: { type: "object" },
         },
         required: ["skillId"],
       },

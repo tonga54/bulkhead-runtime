@@ -29,10 +29,10 @@ export function createMemoryTools(memory: SimpleMemoryManager): ToolDef[] {
       description:
         "Search your memory for relevant information. Returns matching memories ranked by relevance.",
       parameters: {
-        type: "Object",
+        type: "object",
         properties: {
-          query: { type: "String" },
-          maxResults: { type: "Number" },
+          query: { type: "string" },
+          maxResults: { type: "number" },
         },
         required: ["query"],
       },
@@ -58,9 +58,9 @@ export function createMemoryTools(memory: SimpleMemoryManager): ToolDef[] {
         "Store information in your memory for future reference. Use this to remember important facts, " +
         "user preferences, and context that should persist across conversations.",
       parameters: {
-        type: "Object",
+        type: "object",
         properties: {
-          content: { type: "String" },
+          content: { type: "string" },
         },
         required: ["content"],
       },

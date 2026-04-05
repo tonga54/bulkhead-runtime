@@ -243,17 +243,17 @@ export function createSubagentTool(params: {
       "Each sub-agent runs independently and returns its result. " +
       "Use for parallel or complex work that can be decomposed into subtasks.",
     parameters: {
-      type: "Object",
+      type: "object",
       properties: {
         tasks: {
-          type: "Array",
+          type: "array",
           description: "Array of tasks to execute in parallel",
           items: {
-            type: "Object",
+            type: "object",
             properties: {
-              task: { type: "String", description: "The task message for the sub-agent" },
-              label: { type: "String", description: "Optional label for tracking" },
-              role: { type: "String", description: "Optional role/expertise for the sub-agent system prompt" },
+              task: { type: "string", description: "The task message for the sub-agent" },
+              label: { type: "string", description: "Optional label for tracking" },
+              role: { type: "string", description: "Optional role/expertise for the sub-agent system prompt" },
             },
             required: ["task"],
           },

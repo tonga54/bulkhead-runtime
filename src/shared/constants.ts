@@ -5,8 +5,15 @@ export const LINUX_REQUIRED_MESSAGE =
   "Bulkhead Runtime requires Linux. " +
   "For local development on macOS/Windows, use the provided Dockerfile: docker compose run dev";
 
+const PROVIDER_ENV_KEY_OVERRIDES: Record<string, string> = {
+  google: "GEMINI_API_KEY",
+  "google-vertex": "GEMINI_API_KEY",
+};
+
 export function buildProviderEnvKey(provider: string): string {
-  return `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+  const normalized = provider.trim().toLowerCase();
+  return PROVIDER_ENV_KEY_OVERRIDES[normalized]
+    ?? `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
 }
 
 export const PROTECTED_SYSTEM_ENV_KEYS = new Set([
