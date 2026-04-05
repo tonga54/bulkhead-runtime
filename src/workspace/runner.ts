@@ -91,8 +91,20 @@ export function createWorkspaceRunner(
       provider: string,
       modelId: string,
     ): Promise<AgentRunResult> {
-      // Context window guard — same check as single-user runtime
+      let modelContextWindow: number | undefined;
+      try {
+        const { getModel } = await import("@mariozechner/pi-ai");
+        const resolvedModel = getModel(
+          provider as Parameters<typeof getModel>[0],
+          modelId as never,
+        );
+        modelContextWindow = resolvedModel.contextWindow;
+      } catch {
+        // model resolution may fail — proceed with config/default tokens
+      }
+
       const ctxInfo = resolveContextWindowInfo({
+        modelContextWindow,
         configContextTokens: (options as Record<string, unknown>).contextTokens as number | undefined,
       });
       const ctxGuard = evaluateContextWindowGuard({ info: ctxInfo });
@@ -251,8 +263,13 @@ export function createWorkspaceRunner(
         );
       }
 
-      const resolvedScript = path.resolve(execScript);
-      const resolvedSkillDir = path.resolve(skillEntry.path);
+      let resolvedScript: string;
+      try {
+        resolvedScript = fs.realpathSync(execScript);
+      } catch {
+        throw new Error(`Skill script "${execScript}" does not exist or is a broken symlink`);
+      }
+      const resolvedSkillDir = fs.realpathSync(skillEntry.path);
       if (!resolvedScript.startsWith(resolvedSkillDir + path.sep)) {
         throw new Error(`Skill script "${execScript}" resolves outside skill directory`);
       }
@@ -279,6 +296,27 @@ export function createWorkspaceRunner(
       const input = (p?.input && typeof p.input === "object") ? p.input as Record<string, unknown> : {};
       await ctx.hooks.run("after_tool_call", { toolName, input, result: p?.result });
       return {};
+    });
+
+    hostPeer.handle("agent.run.subagent", async (params) => {
+      ipcRateLimiter.check("agent.run.subagent");
+      const p = (params ?? {}) as Record<string, unknown>;
+      const subMessage = typeof p.message === "string" ? p.message : "";
+      if (!subMessage) {
+        return { error: "agent.run.subagent: 'message' is required" };
+      }
+      try {
+        const subResult = await run({
+          message: subMessage,
+          sessionId: typeof p.sessionId === "string" ? p.sessionId : undefined,
+          model: typeof p.model === "string" ? p.model : undefined,
+          provider: typeof p.provider === "string" ? p.provider : undefined,
+          systemPrompt: typeof p.systemPrompt === "string" ? p.systemPrompt : undefined,
+        } as WorkspaceRunOptions);
+        return { response: subResult.response, sessionId: subResult.sessionId };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
     });
 
     const onEvent = (options as Record<string, unknown>).onEvent as
@@ -395,6 +433,51 @@ function findSkillExecutable(skillDir: string): string | undefined {
   return undefined;
 }
 
+const BLOCKED_CREDENTIAL_ENV_KEYS = new Set([
+  "NODE_OPTIONS",
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "NODE_DEBUG",
+  "NODE_REDIRECT_WARNINGS",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "BASH_ENV",
+  "ENV",
+  "CDPATH",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "RUBYOPT",
+  "PERL5OPT",
+  "PERL5LIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "CLASSPATH",
+  "IFS",
+  "MAIL",
+  "MAILPATH",
+  "PROMPT_COMMAND",
+  "PS4",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "GLOBIGNORE",
+  "HISTFILE",
+  "HISTCONTROL",
+  "SSH_AUTH_SOCK",
+  "GPG_AGENT_INFO",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "http_proxy",
+  "HTTP_PROXY",
+  "https_proxy",
+  "HTTPS_PROXY",
+  "no_proxy",
+  "NO_PROXY",
+  "ALL_PROXY",
+]);
+
 const MAX_SKILL_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB
 
 async function executeSkillScript(
@@ -428,6 +511,10 @@ async function executeSkillScript(
   }
   for (const [key, value] of Object.entries(credentials)) {
     if (PROTECTED_SYSTEM_ENV_KEYS.has(key)) continue;
+    if (BLOCKED_CREDENTIAL_ENV_KEYS.has(key.toUpperCase())) {
+      log.warn(`blocked dangerous credential key "${key}" for skill execution`);
+      continue;
+    }
     env[key] = value;
   }
 

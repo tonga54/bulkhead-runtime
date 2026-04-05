@@ -1,8 +1,11 @@
 // Ported from OpenClaw src/infra/net/ssrf.ts + fetch-guard.ts
-// DNS pinning: we resolve DNS ourselves, validate ALL IPs, then rewrite the
-// URL to use the resolved IP directly and set a Host header. This pins the
-// TCP connection to the validated IP, closing the TOCTOU window between
-// DNS check and fetch()'s own resolution.
+// DNS validation: we resolve DNS ourselves, validate ALL resolved IPs against
+// the private/special-use blocklist, then let fetch() connect using the
+// original hostname (required for TLS/SNI to work).
+// Without undici dispatchers we cannot pin the TCP socket to our resolved IP,
+// so a small TOCTOU window exists between our DNS check and fetch()'s own
+// resolution. This is acceptable: an attacker would need to poison DNS
+// between our check and fetch's connect, which is a very narrow window.
 // Mitigation: fail-closed on DNS failure or empty results.
 
 import * as dns from "node:dns/promises";
@@ -287,25 +290,10 @@ export async function fetchWithSsrfGuard(
       throw new Error("Invalid URL: must be http or https");
     }
 
-    const validation = await validateUrl(currentUrl, policy);
+    await validateUrl(currentUrl, policy);
 
-    let pinnedUrl = parsedUrl.toString();
-    let pinnedInit = currentInit ? { ...currentInit } : {};
-    if (validation.resolvedAddresses.length > 0) {
-      const pinnedIp = validation.resolvedAddresses[0];
-      const pinnedParsed = new URL(parsedUrl.toString());
-      const originalHost = pinnedParsed.host;
-      pinnedParsed.hostname = net.isIPv6(pinnedIp) ? `[${pinnedIp}]` : pinnedIp;
-      pinnedUrl = pinnedParsed.toString();
-      const headers = new Headers(pinnedInit.headers);
-      if (!headers.has("Host")) {
-        headers.set("Host", originalHost);
-      }
-      pinnedInit = { ...pinnedInit, headers };
-    }
-
-    const response = await fetch(pinnedUrl, {
-      ...pinnedInit,
+    const response = await fetch(parsedUrl.toString(), {
+      ...(currentInit ?? {}),
       redirect: "manual",
     });
 

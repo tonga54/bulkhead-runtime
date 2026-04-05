@@ -105,6 +105,8 @@ export function createSessionIndexer(options: SessionIndexerOptions): SessionInd
   const sessionStates = new Map<string, SessionState>();
   const sessionDeltas = new Map<string, SessionDelta>();
   const pendingUpdates = new Map<string, ReturnType<typeof setTimeout>>();
+  const activeIndexOps = new Map<string, Promise<SessionIndexResult>>();
+  let indexAllLock: Promise<SessionIndexResult> | null = null;
   let sessionsDirty = false;
   const sessionsDirtyFiles = new Set<string>();
 
@@ -257,6 +259,18 @@ export function createSessionIndexer(options: SessionIndexerOptions): SessionInd
   // --- Index a single session ---
 
   async function indexSession(sessionFile: string): Promise<SessionIndexResult> {
+    const existing = activeIndexOps.get(sessionFile);
+    if (existing) return existing;
+    const op = indexSessionImpl(sessionFile);
+    activeIndexOps.set(sessionFile, op);
+    try {
+      return await op;
+    } finally {
+      activeIndexOps.delete(sessionFile);
+    }
+  }
+
+  async function indexSessionImpl(sessionFile: string): Promise<SessionIndexResult> {
     const result: SessionIndexResult = { sessionsProcessed: 0, chunksStored: 0, chunksRemoved: 0, errors: 0 };
     try {
       if (!fs.existsSync(sessionFile)) return result;
@@ -308,6 +322,16 @@ export function createSessionIndexer(options: SessionIndexerOptions): SessionInd
   }
 
   async function indexAllSessions(): Promise<SessionIndexResult> {
+    if (indexAllLock) return indexAllLock;
+    indexAllLock = indexAllSessionsImpl();
+    try {
+      return await indexAllLock;
+    } finally {
+      indexAllLock = null;
+    }
+  }
+
+  async function indexAllSessionsImpl(): Promise<SessionIndexResult> {
     if (needsFullReindex()) {
       log.info("config changed, clearing session index state and stale chunks");
       // Clear stale chunks from DB before re-indexing (prevents duplicates)

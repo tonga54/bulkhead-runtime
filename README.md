@@ -6,8 +6,6 @@
 Each in its own OS namespace. Each with private memory, encrypted credentials, and an isolated filesystem.
 **No Docker. No cloud. One `npm install`.**
 
-*Built on production-hardened internals from [OpenClaw](https://github.com/nicepkg/openclaw) — failover, SSRF protection, embedding pipelines, session indexing, and more.*
-
 ![Features](docs/assets/features.png)
 
 ---
@@ -51,15 +49,11 @@ const result = await workspace.run({
 
 ## Use Cases
 
+![Use Cases](docs/assets/use-cases.png)
 
-|     |
-| --- |
-|     |
+### SaaS -- one agent per customer
 
-
-**One agent per customer in your SaaS**
-
-Your platform gives each customer an AI agent. Each agent accesses that customer's repos, APIs, and databases — with their own credentials. Customer A's agent can never see Customer B's tokens, data, or conversation history.
+Customer A's agent can never see Customer B's tokens, data, or conversation history.
 
 ```typescript
 app.post("/api/agent", async (req, res) => {
@@ -72,60 +66,45 @@ app.post("/api/agent", async (req, res) => {
 });
 ```
 
-**Per-team agents inside your company**
+### Teams -- per-team agents, per-team secrets
 
-Engineering, ops, and data each get their own agent. Each team's agent connects to their own tools — different GitHub orgs, different databases, different cloud accounts. No credential leaks between teams.
+Different GitHub orgs, different databases, different cloud accounts. No credential leaks between teams.
 
 ```typescript
 const eng  = await platform.createWorkspace("engineering");
 const ops  = await platform.createWorkspace("ops");
-const data = await platform.createWorkspace("data-team");
 
 eng.skills.enable("github-pr");
 ops.skills.enable("pagerduty");
-data.skills.enable("bigquery");
 
 await eng.credentials.store("github", { token: "ghp_eng..." });
 await ops.credentials.store("pagerduty", { token: "pd_..." });
-await data.credentials.store("gcp", { key: "..." });
 ```
 
-**Client-isolated agents in consulting / agencies**
+### Consulting -- client isolation, clean offboarding
 
-Each client project gets its own workspace. The agent knows that client's stack, their conventions, their infra. When you offboard a client, `deleteWorkspace()` wipes everything — memory, credentials, sessions.
+One `deleteWorkspace()` wipes everything -- memory, credentials, sessions. Gone.
 
 ```typescript
 const acme = await platform.createWorkspace("client-acme");
 await acme.credentials.store("aws", { key: "...", secret: "..." });
-await acme.credentials.store("jira", { token: "..." });
+await acme.run({ message: "Check staging and open a Jira ticket if it failed" });
 
-await acme.run({
-  message: "Check the staging deploy and open a Jira ticket if it failed",
-  sessionId: "daily-ops",
-});
-
+// Client offboarded -- clean wipe
 await platform.deleteWorkspace("client-acme");
 ```
 
-**Ephemeral agents for CI / PR review / task runners**
+### CI/CD -- ephemeral agents, zero state leaks
 
-Spin up a workspace per job, per PR, or per deploy. The agent runs, does its thing, and the workspace is destroyed. No state leaks between runs.
+Spin up per job, per PR, per deploy. The workspace is destroyed after. No state leaks between runs.
 
 ```typescript
-const jobId = `deploy-${Date.now()}`;
-const ws = await platform.createWorkspace(jobId);
-
+const ws = await platform.createWorkspace(`deploy-${Date.now()}`);
 await ws.credentials.store("k8s", { kubeconfig: "..." });
 ws.skills.enable("kubectl");
-
-const result = await ws.run({
-  message: "Roll out v2.3.1 to staging, run smoke tests, report status",
-});
-
-await platform.deleteWorkspace(jobId);
+const result = await ws.run({ message: "Roll out v2.3.1 to staging, run smoke tests" });
+await platform.deleteWorkspace(ws.userId);
 ```
-
-**The common thread:** you have multiple tenants (users, teams, clients, jobs) and each one needs an AI agent with its own secrets, tools, and memory — on the same server, without any cross-contamination.
 
 ---
 
@@ -146,7 +125,7 @@ await platform.deleteWorkspace(jobId);
 | **Credential security**          | DIY                | Not built-in         | **AES-256-GCM, never exposed to agent**                   |
 | **Persistent memory**            | DIY                | DIY                  | **SQLite + vector embeddings per tenant**                 |
 | **Embedding cache + batch**      | DIY                | DIY                  | **SQLite cache, batch with retry**                        |
-| **SSRF protection**              | DIY                | DIY                  | **DNS-resolve-and-pin, private-IP blocking, fail-closed** |
+| **SSRF protection**              | DIY                | DIY                  | **DNS-validated, private-IP blocking, fail-closed** |
 | **Model fallback**               | DIY                | DIY                  | **Automatic multi-model fallback chains**                 |
 | **API key rotation**             | DIY                | DIY                  | **Multi-key with rate-limit rotation**                    |
 | **Parallel subagents**           | DIY                | DIY                  | **Built-in with depth limiting**                          |

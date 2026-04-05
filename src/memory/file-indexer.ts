@@ -70,6 +70,7 @@ export function createFileIndexer(options: FileIndexerOptions): FileIndexer {
   let watching = false;
   let watchTimer: ReturnType<typeof setTimeout> | null = null;
   let dirty = false;
+  let syncLock: Promise<FileIndexSyncResult> | null = null;
 
   const indexedFiles = new Map<string, IndexedFileState>();
 
@@ -146,6 +147,18 @@ export function createFileIndexer(options: FileIndexerOptions): FileIndexer {
   }
 
   async function sync(): Promise<FileIndexSyncResult> {
+    if (syncLock) {
+      return syncLock;
+    }
+    syncLock = syncImpl();
+    try {
+      return await syncLock;
+    } finally {
+      syncLock = null;
+    }
+  }
+
+  async function syncImpl(): Promise<FileIndexSyncResult> {
     dirty = false;
     const result: FileIndexSyncResult = {
       filesProcessed: 0, chunksStored: 0, chunksRemoved: 0, errors: 0,

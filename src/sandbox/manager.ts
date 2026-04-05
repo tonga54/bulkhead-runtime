@@ -76,6 +76,12 @@ export function createSandboxManager(): SandboxManager {
           "and /proc/sys/user/max_user_namespaces > 0.",
         );
       }
+      if (options.config.networkIsolation && !caps.hasNetNamespace) {
+        throw new Error(
+          "Sandbox requires network namespace for network isolation but the kernel does not support it. " +
+          "Set networkIsolation to false or enable network namespace support.",
+        );
+      }
 
       return spawnLinuxSandbox(options, caps);
     },
